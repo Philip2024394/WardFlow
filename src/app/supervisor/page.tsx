@@ -1,13 +1,25 @@
-// TODO i18n — Phase 1 will add the supervisor analytics + handover approvals UI.
-export default function SupervisorStub() {
-  return (
-    <div className="mx-auto max-w-2xl px-4 py-10">
-      <h1 className="text-xl font-bold">Supervisor Analytics</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        STUB — Phase 1. Ward-level KPIs, missed-round alerts, escalation queue,
-        handover sign-off. Wire to materialized views over the audit_logs + rounds
-        tables once usage data exists.
-      </p>
-    </div>
-  );
+// Supervisor dashboard — open red alerts + acknowledge + override.
+import { createSupabaseServerClient } from '@/lib/supabase/server';
+import { SupervisorView, type AlertRow } from './view';
+
+export const dynamic = 'force-dynamic';
+
+async function loadAlerts(): Promise<AlertRow[]> {
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { data } = await supabase
+      .from('alerts')
+      .select('id,kind,state,patient_id,nurse_user_id,scheduled_visit_id,payload,opened_at')
+      .eq('state', 'open')
+      .order('opened_at', { ascending: false })
+      .limit(60);
+    return (data as AlertRow[]) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export default async function SupervisorPage() {
+  const alerts = await loadAlerts();
+  return <SupervisorView initialAlerts={alerts} />;
 }

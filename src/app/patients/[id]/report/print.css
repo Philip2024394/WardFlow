@@ -1,0 +1,7 @@
+/* Print styles for the WardFlow audit-trail report. */
+@media print {
+  .no-print { display: none !important; }
+  @page { size: A4; margin: 16mm; }
+  .report { color: #000; }
+  body { background: white; }
+}
