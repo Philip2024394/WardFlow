@@ -1,5 +1,4 @@
 import Link from 'next/link';
-import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
   ShieldCheck,
@@ -9,26 +8,32 @@ import {
   Lock,
   Languages,
 } from 'lucide-react';
+import { CodeEntry } from './code-entry';
 
 export default function LandingPage() {
   return (
-    <main className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-slate-100">
+    <main className="relative min-h-screen text-slate-100">
+      <div
+        aria-hidden
+        className="absolute inset-0 -z-20 bg-[length:100%_auto] bg-top bg-no-repeat md:bg-cover md:bg-center"
+        style={{
+          backgroundImage:
+            "url('https://ik.imagekit.io/nepgaxllc/ChatGPT%20Image%20May%2023,%202026,%2006_27_09%20AM.png')",
+        }}
+      />
+      <div
+        aria-hidden
+        className="absolute inset-0 -z-10 bg-gradient-to-b from-slate-950/80 via-slate-900/70 to-slate-950/90"
+      />
       <header className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
-        <div className="flex items-center gap-2">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Activity className="h-5 w-5" />
-          </div>
-          <span className="text-base font-bold tracking-tight">WardFlow</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Link href="/family">
-            <Button variant="ghost" size="sm">
-              Portal Keluarga
-            </Button>
-          </Link>
-          <Link href="/login">
-            <Button size="sm">Masuk</Button>
-          </Link>
+        <div className="flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="https://ik.imagekit.io/nepgaxllc/Untitleddsfsdfsdfsdf-removebg-preview.png"
+            alt="WardFlow logo"
+            className="h-10 w-10 object-contain"
+          />
+          <span className="text-2xl font-bold tracking-tight">WardFlow</span>
         </div>
       </header>
 
@@ -43,18 +48,15 @@ export default function LandingPage() {
           WardFlow menyatukan ronde perawat, monitor dokter jarak jauh, dan akses
           read-only untuk keluarga pasien — dengan jejak audit yang tidak dapat diubah.
         </p>
-        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Link href="/login">
-            <Button size="xl">Mulai Demo</Button>
+        <CodeEntry />
+        <p className="mt-5 text-xs text-slate-300">
+          Nurse or doctor without a code yet?{' '}
+          <Link href="/signup" className="underline">
+            Create an account
           </Link>
-          <Link href="/family">
-            <Button size="xl" variant="outline">
-              Saya Anggota Keluarga
-            </Button>
-          </Link>
-        </div>
+        </p>
         <p className="mt-4 text-xs text-slate-400">
-          Phase 0 scaffold — bukan perangkat medis bersertifikasi.
+          Phase 0 scaffold — not a certified medical device.
         </p>
       </section>
 
@@ -62,33 +64,33 @@ export default function LandingPage() {
         {[
           {
             icon: Stethoscope,
-            title: 'Untuk Perawat',
-            body: 'Ronde cepat, vital sign satu sentuhan, tombol darurat besar.',
+            title: 'For Nurses',
+            body: 'Fast rounds, one-touch vital signs, large emergency button.',
           },
           {
             icon: Activity,
-            title: 'Untuk Dokter',
-            body: 'Monitor pasien dari jarak jauh, bagikan info pilihan dengan keluarga.',
+            title: 'For Doctors',
+            body: 'Monitor patients remotely, share selected info with family.',
           },
           {
             icon: Users,
-            title: 'Untuk Keluarga',
-            body: 'Akses kode read-only yang diberikan oleh dokter. Tidak ada login akun.',
+            title: 'For Family',
+            body: 'Access the read-only code provided by your doctor. No account login required.',
           },
           {
             icon: ShieldCheck,
-            title: 'Jejak Audit',
-            body: 'Setiap aksi tercatat — audit_logs INSERT-only di database.',
+            title: 'Audit Trail',
+            body: 'Every action is logged — INSERT-only audit_logs in the database.',
           },
           {
             icon: Lock,
-            title: 'RLS per Peran',
-            body: 'Postgres Row-Level Security membatasi data per peran dan bangsal.',
+            title: 'RLS per Role',
+            body: 'Postgres Row-Level Security restricts data per role and ward.',
           },
           {
             icon: Languages,
-            title: 'Bahasa Indonesia',
-            body: 'Antarmuka utama Bahasa, fallback English. Disiapkan untuk staf lokal.',
+            title: 'Indonesian',
+            body: 'Main interface language, English fallback. Prepared for local staff.',
           },
         ].map((f) => (
           <Card key={f.title} className="border-slate-800 bg-slate-900/60 p-5">
