@@ -122,6 +122,23 @@ export function IntakeForm({ patient }: { patient: PatientLite }) {
   }, [intakeId]);
 
   async function propose(doctor: SuggestedDoctor) {
+    const topDoctorId = suggestions[0]?.doctor_user_id;
+    const isOverride = !!topDoctorId && doctor.doctor_user_id !== topDoctorId;
+    let reason: string;
+    if (isOverride) {
+      const entered = window.prompt(
+        `${doctor.full_name} is not the top-ranked suggestion. Enter the reason for overriding the auto-suggestion:`,
+        '',
+      );
+      if (!entered || entered.trim().length < 3) {
+        alert('Override reason is required (3+ characters).');
+        return;
+      }
+      reason = entered.trim();
+    } else {
+      reason = `Auto-suggested for ${chief}`;
+    }
+
     setBusy(true);
     try {
       const res = await fetch('/api/doctor/proposals', {
@@ -133,13 +150,14 @@ export function IntakeForm({ patient }: { patient: PatientLite }) {
           origin: 'er',
           intake_id: intakeId,
           rank_score: doctor.rank_score,
-          reason: `Auto-suggested for ${chief}`,
+          reason,
+          is_override: isOverride,
         }),
       });
       const j = await res.json().catch(() => ({}));
       if (res.ok) {
         alert(
-          `Proposal sent to ${doctor.full_name}. Patient or NOK must confirm at bedside.`,
+          `${isOverride ? 'Override' : 'Proposal'} sent to ${doctor.full_name}. Patient or NOK must confirm at bedside.`,
         );
       } else {
         alert(`Error: ${j.error ?? 'failed'}`);
@@ -233,34 +251,43 @@ export function IntakeForm({ patient }: { patient: PatientLite }) {
             Ranked doctor suggestions
           </h2>
           <ul className="space-y-2">
-            {suggestions.map((d) => (
-              <li key={d.doctor_user_id}>
-                <Card className="flex items-center justify-between gap-3 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold">{d.full_name}</span>
-                      <Badge variant="secondary">{d.wf_id}</Badge>
-                      <Badge variant={d.is_online ? 'default' : 'secondary'}>
-                        {d.is_online ? 'Online' : 'Offline'}
-                      </Badge>
-                      <Badge variant={d.on_shift_now ? 'default' : 'outline'}>
-                        {d.on_shift_now ? 'On shift' : 'Remote'}
-                      </Badge>
+            {suggestions.map((d, idx) => {
+              const isTop = idx === 0;
+              return (
+                <li key={d.doctor_user_id}>
+                  <Card className="flex items-center justify-between gap-3 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold">{d.full_name}</span>
+                        <Badge variant="secondary">{d.wf_id}</Badge>
+                        {isTop && <Badge>Top suggestion</Badge>}
+                        <Badge variant={d.is_online ? 'default' : 'secondary'}>
+                          {d.is_online ? 'Online' : 'Offline'}
+                        </Badge>
+                        <Badge variant={d.on_shift_now ? 'default' : 'outline'}>
+                          {d.on_shift_now ? 'On shift' : 'Remote'}
+                        </Badge>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {d.specialty ?? '—'} · {d.expertise ?? ''} · workload:{' '}
+                        {d.current_patient_count}
+                      </div>
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {d.specialty ?? '—'} · {d.expertise ?? ''} · workload:{' '}
-                      {d.current_patient_count}
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="font-mono text-xs">score {d.rank_score.toFixed(1)}</span>
+                      <Button
+                        size="sm"
+                        variant={isTop ? 'default' : 'outline'}
+                        onClick={() => propose(d)}
+                        disabled={busy}
+                      >
+                        {isTop ? 'Propose' : 'Override'}
+                      </Button>
                     </div>
-                  </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <span className="font-mono text-xs">score {d.rank_score.toFixed(1)}</span>
-                    <Button size="sm" onClick={() => propose(d)} disabled={busy}>
-                      Propose
-                    </Button>
-                  </div>
-                </Card>
-              </li>
-            ))}
+                  </Card>
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}
