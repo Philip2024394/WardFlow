@@ -1,22 +1,23 @@
-// POST /api/visits/confirm — bedside visit witness.
-// Captures the nurse-arrived-at-bed event. Patient confirms via:
-//   - patient_fingerprint  (stubbed; pass-through until WebAuthn ships)
-//   - patient_tap          (touchscreen acknowledgement)
-//   - photo_fallback       (nurse uploads a photo of themselves at the bed)
-//   - family_witness       (cognitively impaired patient; family signs)
-//   - two_nurse_witness    (no patient + no family; two distinct nurses sign)
+// POST /api/visits/confirm — bedside visit witness (cookie-auth nurse).
+// Captures the nurse-arrived-at-bed event for the legacy/non-wristband methods:
+//   - patient_tap, photo_fallback, family_witness, two_nurse_witness
+// (wristband_scan + patient_fingerprint go through /api/visits/scan)
 //
-// If scheduled_visit_id is provided AND the visit is still 'pending', this also
-// marks the scheduled_visits row as 'confirmed' atomically.
+// If GPS is provided AND the patient has a ward with a geofence configured,
+// the scan must be inside the geofence (server-side haversine).
+//
+// If scheduled_visit_id is provided AND the row is still 'pending', this also
+// marks scheduled_visits as 'confirmed' atomically and closes any open
+// missed-round alert.
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { createSupabaseServerClient, createSupabaseServiceClient } from '@/lib/supabase/server';
+import { createSupabaseServiceClient } from '@/lib/supabase/server';
+import { getStaffSession } from '@/lib/auth/staff-session';
 import { logAuditEvent } from '@/lib/audit/log';
 
 const Schema = z.object({
   patient_id: z.string().uuid(),
   method: z.enum([
-    'patient_fingerprint',
     'patient_tap',
     'photo_fallback',
     'family_witness',
@@ -31,9 +32,17 @@ const Schema = z.object({
   client_seq: z.number().int().optional(),
   client_nonce: z.string().max(64).optional(),
   offline_queued: z.boolean().optional(),
+  gps_lat: z.number().min(-90).max(90).optional(),
+  gps_lng: z.number().min(-180).max(180).optional(),
+  gps_accuracy_m: z.number().nonnegative().optional(),
 });
 
 export async function POST(req: Request) {
+  const session = await getStaffSession();
+  if (!session || session.role !== 'nurse') {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -47,93 +56,116 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  const v = parsed.data;
+  const supabase = createSupabaseServiceClient();
+  const occurredAt = new Date().toISOString();
 
-  try {
-    const supabase = await createSupabaseServerClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'unauthenticated' }, { status: 401 });
+  const signaturePayload: Record<string, unknown> = { ...(v.signature_payload ?? {}) };
 
-    const occurredAt = new Date().toISOString();
-
-    const { data: ins, error: insErr } = await supabase
-      .from('visit_confirmations')
-      .insert({
-        patient_id: parsed.data.patient_id,
-        nurse_user_id: user.id,
-        scheduled_visit_id: parsed.data.scheduled_visit_id ?? null,
-        method: parsed.data.method,
-        witness_nurse_id: parsed.data.witness_nurse_id ?? null,
-        witness_family_contact_id: parsed.data.witness_family_contact_id ?? null,
-        signature_payload: parsed.data.signature_payload ?? null,
-        photo_url: parsed.data.photo_url ?? null,
-        device_id: parsed.data.device_id ?? null,
-        client_seq: parsed.data.client_seq ?? null,
-        client_nonce: parsed.data.client_nonce ?? null,
-        offline_queued_at: parsed.data.offline_queued ? occurredAt : null,
-        occurred_at: occurredAt,
+  if (typeof v.gps_lat === 'number' && typeof v.gps_lng === 'number') {
+    const { data: prox } = await supabase
+      .rpc('check_ward_proximity', {
+        p_patient_id: v.patient_id,
+        p_lat: v.gps_lat,
+        p_lng: v.gps_lng,
       })
-      .select('id')
       .single();
-    if (insErr || !ins) {
-      // Handle nonce-replay (offline queue) gracefully.
-      if (
-        parsed.data.client_nonce &&
-        insErr?.message?.includes('ux_visitconf_client_nonce')
-      ) {
-        return NextResponse.json({ ok: true, deduped: true });
+    type Prox = {
+      ok: boolean;
+      enforced: boolean;
+      distance_m: number | null;
+      ward_id: string | null;
+      ward_name: string | null;
+    };
+    const p = prox as Prox | null;
+    if (p) {
+      signaturePayload.gps_lat = v.gps_lat;
+      signaturePayload.gps_lng = v.gps_lng;
+      signaturePayload.gps_accuracy_m = v.gps_accuracy_m ?? null;
+      signaturePayload.geofence_enforced = p.enforced;
+      signaturePayload.geofence_distance_m = p.distance_m;
+      signaturePayload.ward_id = p.ward_id;
+      if (p.enforced && !p.ok) {
+        return NextResponse.json(
+          {
+            error: 'out_of_geofence',
+            ward_name: p.ward_name,
+            distance_m: p.distance_m,
+          },
+          { status: 403 },
+        );
       }
-      return NextResponse.json(
-        { error: 'insert_failed', detail: insErr?.message },
-        { status: 500 },
-      );
     }
+  } else {
+    signaturePayload.gps_missing = true;
+  }
 
-    // Mark scheduled visit confirmed (if any) using the service client to bypass
-    // nurse RLS update on scheduled_visits.
-    if (parsed.data.scheduled_visit_id) {
-      const svc = createSupabaseServiceClient();
-      await svc
-        .from('scheduled_visits')
-        .update({
-          status: 'confirmed',
-          confirmed_by_visit_id: ins.id,
-          confirmed_at: occurredAt,
-        })
-        .eq('id', parsed.data.scheduled_visit_id)
-        .eq('status', 'pending');
-
-      // Close any open missed-round alert for this visit.
-      await svc
-        .from('alerts')
-        .update({ state: 'resolved', resolved_at: occurredAt })
-        .eq('scheduled_visit_id', parsed.data.scheduled_visit_id)
-        .eq('state', 'open');
+  const { data: ins, error: insErr } = await supabase
+    .from('visit_confirmations')
+    .insert({
+      patient_id: v.patient_id,
+      nurse_user_id: session.user_id,
+      scheduled_visit_id: v.scheduled_visit_id ?? null,
+      method: v.method,
+      witness_nurse_id: v.witness_nurse_id ?? null,
+      witness_family_contact_id: v.witness_family_contact_id ?? null,
+      signature_payload: signaturePayload,
+      photo_url: v.photo_url ?? null,
+      device_id: v.device_id ?? null,
+      client_seq: v.client_seq ?? null,
+      client_nonce: v.client_nonce ?? null,
+      offline_queued_at: v.offline_queued ? occurredAt : null,
+      occurred_at: occurredAt,
+    })
+    .select('id')
+    .single();
+  if (insErr || !ins) {
+    if (
+      v.client_nonce &&
+      insErr?.message?.includes('ux_visitconf_client_nonce')
+    ) {
+      return NextResponse.json({ ok: true, deduped: true });
     }
-
-    // Update nurse online + last_seen.
-    {
-      const svc = createSupabaseServiceClient();
-      await svc
-        .from('nurses')
-        .update({ is_online: true, last_seen_at: occurredAt })
-        .eq('user_id', user.id);
-    }
-
-    await logAuditEvent({
-      action: 'visit.confirm',
-      entity_type: 'visit_confirmations',
-      entity_id: ins.id,
-      after: { method: parsed.data.method, scheduled_visit_id: parsed.data.scheduled_visit_id },
-      device_id: parsed.data.device_id ?? null,
-    });
-
-    return NextResponse.json({ ok: true, visit_confirmation_id: ins.id });
-  } catch (err) {
     return NextResponse.json(
-      { error: 'internal', detail: (err as Error).message },
+      { error: 'insert_failed', detail: insErr?.message },
       { status: 500 },
     );
   }
+
+  if (v.scheduled_visit_id) {
+    await supabase
+      .from('scheduled_visits')
+      .update({
+        status: 'confirmed',
+        confirmed_by_visit_id: ins.id,
+        confirmed_at: occurredAt,
+      })
+      .eq('id', v.scheduled_visit_id)
+      .eq('status', 'pending');
+
+    await supabase
+      .from('alerts')
+      .update({ state: 'resolved', resolved_at: occurredAt })
+      .eq('scheduled_visit_id', v.scheduled_visit_id)
+      .eq('state', 'open');
+  }
+
+  await supabase
+    .from('nurses')
+    .update({ is_online: true, last_seen_at: occurredAt })
+    .eq('user_id', session.user_id);
+
+  await logAuditEvent({
+    action: 'visit.confirm',
+    entity_type: 'visit_confirmations',
+    entity_id: ins.id,
+    after: {
+      method: v.method,
+      scheduled_visit_id: v.scheduled_visit_id,
+      geofence_enforced: signaturePayload.geofence_enforced ?? false,
+    },
+    device_id: v.device_id ?? null,
+  });
+
+  return NextResponse.json({ ok: true, visit_confirmation_id: ins.id });
 }
