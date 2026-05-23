@@ -1,6 +1,7 @@
 // POST /api/er/patients — ER admin creates a new patient at the ER door.
-// One transaction-ish flow: patients row + family_access_code + initial
-// er_intake_report row. Returns the family/patient code to share at the desk.
+// One flow: patients row + family_access_code + wristband_token + initial
+// er_intake_report. Returns the family code AND the wristband token (the
+// wristband QR is printed from this token).
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createSupabaseServiceClient } from '@/lib/supabase/server';
@@ -90,6 +91,30 @@ export async function POST(req: Request) {
     );
   }
 
+  const { data: tokenRow, error: tokErr } = await supabase
+    .rpc('generate_wristband_token')
+    .single();
+  if (tokErr || typeof tokenRow !== 'string') {
+    return NextResponse.json(
+      { error: 'token_gen_failed', detail: tokErr?.message },
+      { status: 500 },
+    );
+  }
+  const wristbandToken = tokenRow;
+  const { error: insTokErr } = await supabase
+    .from('patient_wristband_tokens')
+    .insert({
+      patient_id: patient.id,
+      token: wristbandToken,
+      issued_by: session.user_id,
+    });
+  if (insTokErr) {
+    return NextResponse.json(
+      { error: 'token_insert_failed', detail: insTokErr.message },
+      { status: 500 },
+    );
+  }
+
   const { data: intake, error: intakeErr } = await supabase
     .from('er_intake_reports')
     .insert({
@@ -124,6 +149,7 @@ export async function POST(req: Request) {
     ok: true,
     patient_id: patient.id,
     family_code: familyCode,
+    wristband_token: wristbandToken,
     intake_id: intake?.id,
   });
 }
