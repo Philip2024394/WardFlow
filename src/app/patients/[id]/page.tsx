@@ -1,8 +1,14 @@
 // Patient page — care team panel + medications + recent visits.
-// Crucially: NEVER shows standard_fee_idr. Reads doctor info via list_doctor_public_profiles.
-import { notFound } from 'next/navigation';
+// Care team is filtered to ACTIVE doctor_assignments (superseded_at is null)
+// so a nurse only sees the doctors currently caring for this patient. Newly
+// assigned doctors (within the last 24h) get a "Just assigned" badge.
+// Auth: cookie staff session OR family session matching the URL patient_id.
+import { notFound, redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
 import Link from 'next/link';
-import { createSupabaseServerClient } from '@/lib/supabase/server';
+import { createSupabaseServiceClient } from '@/lib/supabase/server';
+import { getStaffSession } from '@/lib/auth/staff-session';
+import { verifyFamilyCookie, FAMILY_COOKIE_NAME } from '@/lib/family/session';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 
@@ -31,65 +37,71 @@ interface DoctorPublic {
   current_patient_count: number;
 }
 
+const RECENTLY_ASSIGNED_HOURS = 24;
+
+async function authorize(patientId: string): Promise<boolean> {
+  const staff = await getStaffSession();
+  if (staff) return true;
+  const store = await cookies();
+  const fam = verifyFamilyCookie(store.get(FAMILY_COOKIE_NAME)?.value);
+  return !!(fam && fam.patient_id === patientId);
+}
+
 async function loadAll(id: string) {
-  try {
-    const supabase = await createSupabaseServerClient();
-    const { data: patient } = await supabase
-      .from('patients')
-      .select(
-        'id,full_name,bed_no,ward_id,risk_level,cognitive_status,assigned_doctor_id,assigned_nurse_id,admitted_at',
-      )
-      .eq('id', id)
-      .maybeSingle();
-    if (!patient) return null;
+  const supabase = createSupabaseServiceClient();
+  const { data: patient } = await supabase
+    .from('patients')
+    .select(
+      'id,full_name,bed_no,ward_id,risk_level,cognitive_status,assigned_doctor_id,assigned_nurse_id,admitted_at',
+    )
+    .eq('id', id)
+    .maybeSingle();
+  if (!patient) return null;
 
-    const { data: docPublics } = await supabase.rpc('list_doctor_public_profiles');
-    const allDoctors = (docPublics as DoctorPublic[]) ?? [];
+  const { data: docPublics } = await supabase.rpc('list_doctor_public_profiles');
+  const allDoctors = (docPublics as DoctorPublic[] | null) ?? [];
 
-    const { data: assigns } = await supabase
-      .from('doctor_assignments')
-      .select(
-        'id,doctor_user_id,primary_nurse_id,backup_nurse_id,emergency_exception,created_at,origin',
-      )
-      .eq('patient_id', id)
-      .is('superseded_at', null)
-      .order('created_at', { ascending: false });
+  const { data: assigns } = await supabase
+    .from('doctor_assignments')
+    .select(
+      'id,doctor_user_id,primary_nurse_id,backup_nurse_id,emergency_exception,created_at,origin',
+    )
+    .eq('patient_id', id)
+    .is('superseded_at', null)
+    .order('created_at', { ascending: false });
 
-    const { data: meds } = await supabase
-      .from('doctor_orders')
-      .select('id,kind,drug_name,dose,route,schedule_cron,duration,body,created_at')
-      .eq('patient_id', id)
-      .eq('kind', 'medication')
-      .is('superseded_at', null)
-      .order('created_at', { ascending: false });
+  const { data: meds } = await supabase
+    .from('doctor_orders')
+    .select('id,kind,drug_name,dose,route,schedule_cron,duration,body,created_at')
+    .eq('patient_id', id)
+    .eq('kind', 'medication')
+    .is('superseded_at', null)
+    .order('created_at', { ascending: false });
 
-    const { data: notes } = await supabase
-      .from('doctor_orders')
-      .select('id,kind,body,created_at')
-      .eq('patient_id', id)
-      .neq('kind', 'medication')
-      .is('superseded_at', null)
-      .order('created_at', { ascending: false })
-      .limit(10);
+  const { data: notes } = await supabase
+    .from('doctor_orders')
+    .select('id,kind,body,created_at')
+    .eq('patient_id', id)
+    .neq('kind', 'medication')
+    .is('superseded_at', null)
+    .order('created_at', { ascending: false })
+    .limit(10);
 
-    const { data: visits } = await supabase
-      .from('visit_confirmations')
-      .select('id,nurse_user_id,occurred_at,method')
-      .eq('patient_id', id)
-      .order('occurred_at', { ascending: false })
-      .limit(10);
+  const { data: visits } = await supabase
+    .from('visit_confirmations')
+    .select('id,nurse_user_id,occurred_at,method')
+    .eq('patient_id', id)
+    .order('occurred_at', { ascending: false })
+    .limit(10);
 
-    return {
-      patient: patient as PatientDetail,
-      allDoctors,
-      assigns: assigns ?? [],
-      meds: meds ?? [],
-      notes: notes ?? [],
-      visits: visits ?? [],
-    };
-  } catch {
-    return null;
-  }
+  return {
+    patient: patient as PatientDetail,
+    allDoctors,
+    assigns: assigns ?? [],
+    meds: meds ?? [],
+    notes: notes ?? [],
+    visits: visits ?? [],
+  };
 }
 
 export default async function PatientPage({
@@ -98,17 +110,30 @@ export default async function PatientPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const ok = await authorize(id);
+  if (!ok) redirect('/');
+
   const data = await loadAll(id);
   if (!data) notFound();
 
   const { patient, allDoctors, assigns, meds, notes, visits } = data;
   const doctorById = new Map(allDoctors.map((d) => [d.user_id, d]));
-  const careDoctors = (assigns as { doctor_user_id: string; emergency_exception: boolean }[]).map(
-    (a) => ({
-      ...a,
-      doctor: doctorById.get(a.doctor_user_id),
-    }),
-  );
+  const now = Date.now();
+  const careDoctors = (
+    assigns as { doctor_user_id: string; emergency_exception: boolean; created_at: string }[]
+  )
+    .map((a) => {
+      const ageHours = (now - new Date(a.created_at).getTime()) / 3_600_000;
+      return {
+        ...a,
+        doctor: doctorById.get(a.doctor_user_id),
+        is_recent: ageHours < RECENTLY_ASSIGNED_HOURS,
+      };
+    })
+    .sort((a, b) => {
+      // Newest assignments first so "Just assigned" is at the top.
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -124,18 +149,32 @@ export default async function PatientPage({
               </Badge>
             </div>
           </div>
-          <Link
-            href={`/patients/${patient.id}/report`}
-            className="inline-flex h-11 items-center rounded-md border px-3 text-sm"
-          >
-            View audit report
-          </Link>
+          <div className="flex gap-2">
+            <Link
+              href={`/patients/${patient.id}/history`}
+              className="inline-flex h-11 items-center rounded-md border px-3 text-sm"
+            >
+              History
+            </Link>
+            <Link
+              href={`/patients/${patient.id}/procedures`}
+              className="inline-flex h-11 items-center rounded-md border px-3 text-sm"
+            >
+              Procedures
+            </Link>
+            <Link
+              href={`/patients/${patient.id}/report`}
+              className="inline-flex h-11 items-center rounded-md border px-3 text-sm"
+            >
+              Audit report
+            </Link>
+          </div>
         </div>
       </header>
 
       <section className="mb-4">
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-          Care team
+          Care team — currently assigned doctors
         </h2>
         {careDoctors.length === 0 ? (
           <Card className="px-4 py-6 text-sm text-muted-foreground">
@@ -165,6 +204,11 @@ export default async function PatientPage({
                           {d.doctor?.full_name ?? '—'}
                         </span>
                         <Badge variant="secondary">{d.doctor?.wf_id ?? ''}</Badge>
+                        {d.is_recent && (
+                          <Badge className="bg-emerald-500/20 text-emerald-300">
+                            Just assigned
+                          </Badge>
+                        )}
                         {d.emergency_exception && (
                           <Badge variant="destructive">Emergency exception</Badge>
                         )}
@@ -177,6 +221,9 @@ export default async function PatientPage({
                           {d.doctor.expertise}
                         </div>
                       )}
+                      <div className="mt-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                        Assigned {new Date(d.created_at).toLocaleString()}
+                      </div>
                     </div>
                   </div>
                 </Card>
