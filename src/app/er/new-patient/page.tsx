@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import QRCode from 'qrcode';
 import { Card } from '@/components/ui/card';
@@ -20,20 +20,38 @@ interface Doctor {
   is_online: boolean;
 }
 
-interface CreateResult {
-  family_code: string;
+interface Match {
   patient_id: string;
-  wristband_token: string;
+  full_name: string;
+  dob: string | null;
+  country: string | null;
+  prior_admissions_count: number;
+  last_admission_at: string | null;
+  last_chief_complaint: string | null;
+  last_medications: string[] | null;
+  last_ward_name: string | null;
+}
+
+interface CreateResult {
+  patient_id: string;
+  intake_id: string | null;
+  family_code: string | null;
+  wristband_token: string | null;
+  is_returning: boolean;
   patient_name: string;
 }
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 export default function NewPatientPage() {
   const router = useRouter();
   const [wards, setWards] = useState<Ward[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
+
   const [fullName, setFullName] = useState('');
   const [dob, setDob] = useState('');
   const [gender, setGender] = useState<'M' | 'F' | 'X' | ''>('');
+  const [country, setCountry] = useState('ID');
   const [allergies, setAllergies] = useState('');
   const [arrivalReason, setArrivalReason] = useState('');
   const [chiefComplaint, setChiefComplaint] = useState('');
@@ -41,6 +59,10 @@ export default function NewPatientPage() {
   const [treatingDoctor, setTreatingDoctor] = useState('');
   const [assignedWard, setAssignedWard] = useState('');
   const [severity, setSeverity] = useState<'1' | '2' | '3' | '4' | '5'>('3');
+
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [linkedPatientId, setLinkedPatientId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CreateResult | null>(null);
@@ -56,10 +78,45 @@ export default function NewPatientPage() {
     })();
   }, []);
 
+  const searchKey = useMemo(
+    () => `${fullName.trim().toLowerCase()}|${dob}|${country.trim()}`,
+    [fullName, dob, country],
+  );
+
+  useEffect(() => {
+    if (linkedPatientId) return; // already linked
+    if (fullName.trim().length < 2 || !ISO_DATE.test(dob)) {
+      setMatches([]);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const q = new URLSearchParams({
+          name: fullName.trim(),
+          dob,
+          ...(country.trim() ? { country: country.trim() } : {}),
+        });
+        const res = await fetch(`/api/er/patients/search?${q.toString()}`);
+        const j = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        setMatches((j.matches as Match[]) ?? []);
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [searchKey, fullName, dob, country, linkedPatientId]);
+
   function resetForm() {
     setFullName('');
     setDob('');
     setGender('');
+    setCountry('ID');
     setAllergies('');
     setArrivalReason('');
     setChiefComplaint('');
@@ -67,6 +124,8 @@ export default function NewPatientPage() {
     setTreatingDoctor('');
     setAssignedWard('');
     setSeverity('3');
+    setMatches([]);
+    setLinkedPatientId(null);
   }
 
   async function submit(e: React.FormEvent) {
@@ -78,9 +137,11 @@ export default function NewPatientPage() {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
+          existing_patient_id: linkedPatientId ?? undefined,
           full_name: fullName.trim(),
           dob: dob || undefined,
           gender: gender || undefined,
+          country: country.trim() || undefined,
           allergies: allergies.split(',').map((s) => s.trim()).filter(Boolean),
           arrival_reason: arrivalReason.trim(),
           chief_complaint: chiefComplaint.trim(),
@@ -97,9 +158,11 @@ export default function NewPatientPage() {
         return;
       }
       setResult({
-        family_code: j.family_code,
         patient_id: j.patient_id,
-        wristband_token: j.wristband_token,
+        intake_id: j.intake_id ?? null,
+        family_code: j.family_code ?? null,
+        wristband_token: j.wristband_token ?? null,
+        is_returning: !!j.is_returning,
         patient_name: fullName.trim(),
       });
     } catch {
@@ -128,8 +191,8 @@ export default function NewPatientPage() {
         <Card className="border-slate-800 bg-slate-900 p-6">
           <h1 className="text-xl font-bold">ER — new patient arrival</h1>
           <p className="mt-1 text-xs text-slate-400">
-            Capture details at the ER door. On save you will receive the
-            patient/family code AND a wristband QR to print.
+            Capture details at the ER door. The system checks for a prior
+            admission as you type the identity.
           </p>
 
           <form onSubmit={submit} className="mt-5 space-y-5">
@@ -143,8 +206,8 @@ export default function NewPatientPage() {
                   <Input id="full_name" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
                 </div>
                 <div>
-                  <Label htmlFor="dob">Date of birth</Label>
-                  <Input id="dob" type="date" value={dob} onChange={(e) => setDob(e.target.value)} />
+                  <Label htmlFor="dob">Date of birth *</Label>
+                  <Input id="dob" type="date" value={dob} onChange={(e) => setDob(e.target.value)} required />
                 </div>
                 <div>
                   <Label htmlFor="gender">Gender</Label>
@@ -161,10 +224,100 @@ export default function NewPatientPage() {
                   </select>
                 </div>
                 <div>
+                  <Label htmlFor="country">Country (ISO code or name)</Label>
+                  <Input
+                    id="country"
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value.toUpperCase())}
+                    placeholder="ID, US, AU…"
+                  />
+                </div>
+                <div className="md:col-span-2">
                   <Label htmlFor="allergies">Allergies (comma-separated)</Label>
                   <Input id="allergies" value={allergies} onChange={(e) => setAllergies(e.target.value)} placeholder="penicillin, latex" />
                 </div>
               </div>
+
+              {(searching || matches.length > 0 || linkedPatientId) && (
+                <div className="rounded-md border border-amber-700 bg-amber-950/40 p-3">
+                  {searching && (
+                    <p className="text-xs text-amber-300">Checking prior admissions…</p>
+                  )}
+                  {linkedPatientId && (
+                    <div className="text-xs text-emerald-300">
+                      Linked to existing patient record. The new ER intake will
+                      attach to their history.{' '}
+                      <button
+                        type="button"
+                        className="underline"
+                        onClick={() => setLinkedPatientId(null)}
+                      >
+                        Unlink
+                      </button>
+                    </div>
+                  )}
+                  {!linkedPatientId && matches.length > 0 && (
+                    <>
+                      <p className="text-sm font-semibold text-amber-200">
+                        Patient previously admitted — {matches.length} match
+                        {matches.length === 1 ? '' : 'es'}
+                      </p>
+                      <ul className="mt-2 space-y-2">
+                        {matches.map((m) => (
+                          <li
+                            key={m.patient_id}
+                            className="rounded bg-slate-900/60 p-2 text-xs text-slate-200"
+                          >
+                            <div className="font-semibold">{m.full_name}</div>
+                            <div className="text-slate-400">
+                              DOB {m.dob ?? '—'} · {m.country ?? 'country n/a'}
+                            </div>
+                            <div className="mt-1">
+                              {m.prior_admissions_count} prior ER intake
+                              {m.prior_admissions_count === 1 ? '' : 's'}
+                              {m.last_admission_at && (
+                                <>
+                                  {' · last '}
+                                  {new Date(m.last_admission_at).toLocaleString()}
+                                </>
+                              )}
+                            </div>
+                            {m.last_chief_complaint && (
+                              <div className="mt-1 text-slate-300">
+                                Last complaint:{' '}
+                                <em>{m.last_chief_complaint}</em>
+                              </div>
+                            )}
+                            {m.last_medications && m.last_medications.length > 0 && (
+                              <div className="mt-1 text-slate-300">
+                                Last ER meds:{' '}
+                                <em>{m.last_medications.join(', ')}</em>
+                              </div>
+                            )}
+                            {m.last_ward_name && (
+                              <div className="text-slate-400">
+                                Last ward: {m.last_ward_name}
+                              </div>
+                            )}
+                            <div className="mt-2 flex gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                onClick={() => setLinkedPatientId(m.patient_id)}
+                              >
+                                Use existing record
+                              </Button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="mt-2 text-xs text-amber-300">
+                        Or continue and a new record will be created on submit.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
             </section>
 
             <section className="space-y-3">
@@ -239,7 +392,11 @@ export default function NewPatientPage() {
             {error && <p className="text-sm text-red-400">{error}</p>}
 
             <Button type="submit" size="lg" className="w-full" disabled={busy}>
-              {busy ? 'Creating…' : 'Create patient & issue code'}
+              {busy
+                ? 'Creating…'
+                : linkedPatientId
+                  ? 'Record new ER intake for existing patient'
+                  : 'Create patient & issue code'}
             </Button>
           </form>
         </Card>
@@ -260,13 +417,38 @@ function SuccessScreen({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || !result.wristband_token) return;
     QRCode.toCanvas(canvasRef.current, result.wristband_token, {
       width: 256,
       margin: 1,
       color: { dark: '#000000', light: '#ffffff' },
     }).catch(() => undefined);
   }, [result.wristband_token]);
+
+  if (result.is_returning) {
+    return (
+      <main className="min-h-screen bg-slate-950 px-4 py-10 text-slate-100">
+        <div className="mx-auto max-w-md">
+          <Card className="border-slate-800 bg-slate-900 p-6">
+            <h1 className="text-xl font-bold">Returning patient — intake recorded</h1>
+            <p className="mt-2 text-sm text-slate-300">
+              The new ER intake was attached to the existing record for{' '}
+              <strong>{result.patient_name}</strong>. Their existing
+              patient/family code and wristband still apply.
+            </p>
+            <div className="mt-6 flex gap-2">
+              <Button className="flex-1" size="lg" onClick={onContinue}>
+                Continue to triage
+              </Button>
+              <Button variant="outline" size="lg" onClick={onNew}>
+                New patient
+              </Button>
+            </div>
+          </Card>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-slate-950 px-4 py-10 text-slate-100">
@@ -303,8 +485,8 @@ function SuccessScreen({
               Patient & family code
             </h2>
             <p className="mt-1 text-xs text-slate-300">
-              Share this code with the patient and family. Same code for both —
-              enter on the home page.
+              Share with the patient and family. Same code for both — enter on
+              the home page.
             </p>
             <p className="mt-2 select-all rounded bg-slate-800 px-3 py-3 text-center font-mono text-2xl tracking-widest">
               {result.family_code}
@@ -324,19 +506,9 @@ function SuccessScreen({
 
       <style jsx global>{`
         @media print {
-          body * {
-            visibility: hidden;
-          }
-          #wristband-print,
-          #wristband-print * {
-            visibility: visible;
-          }
-          #wristband-print {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-          }
+          body * { visibility: hidden; }
+          #wristband-print, #wristband-print * { visibility: visible; }
+          #wristband-print { position: absolute; left: 0; top: 0; width: 100%; }
         }
       `}</style>
     </main>

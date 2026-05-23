@@ -1,7 +1,14 @@
-// POST /api/er/patients — ER admin creates a new patient at the ER door.
-// One flow: patients row + family_access_code + wristband_token + initial
-// er_intake_report. Returns the family code AND the wristband token (the
-// wristband QR is printed from this token).
+// POST /api/er/patients — ER admin creates a new patient at the ER door, OR
+// records a new ER arrival for an EXISTING patient (returning patient).
+//
+// If existing_patient_id is provided: skip patient row insert, skip family
+// code issuance (the patient/family already has a code from their first
+// admission), skip wristband (their existing band is still valid; if it's
+// been replaced, rotate via /api/wristband/rotate). Only the new
+// er_intake_report row is created.
+//
+// Otherwise: full create flow (patients + family_access_code +
+// wristband token + initial intake).
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createSupabaseServiceClient } from '@/lib/supabase/server';
@@ -9,9 +16,11 @@ import { getStaffSession } from '@/lib/auth/staff-session';
 import { generateAccessCode } from '@/lib/family/session';
 
 const Schema = z.object({
+  existing_patient_id: z.string().uuid().optional(),
   full_name: z.string().min(2).max(120),
   dob: z.string().optional(),
   gender: z.enum(['M', 'F', 'X']).optional(),
+  country: z.string().max(40).optional(),
   allergies: z.array(z.string()).optional(),
   entry_at: z.string().optional(),
   arrival_reason: z.string().min(2).max(500),
@@ -50,75 +59,92 @@ export async function POST(req: Request) {
   const v = parsed.data;
 
   const supabase = createSupabaseServiceClient();
+  let patientId: string;
+  let familyCode: string | null = null;
+  let wristbandToken: string | null = null;
 
-  const { data: patient, error: patErr } = await supabase
-    .from('patients')
-    .insert({
-      full_name: v.full_name,
-      dob: v.dob ?? null,
-      gender: v.gender ?? null,
-      allergies: v.allergies ?? [],
-      created_by: session.user_id,
-    })
-    .select('id')
-    .single();
-  if (patErr || !patient) {
-    return NextResponse.json(
-      { error: 'patient_insert_failed', detail: patErr?.message },
-      { status: 400 },
-    );
-  }
+  if (v.existing_patient_id) {
+    const { data: existing, error: exErr } = await supabase
+      .from('patients')
+      .select('id')
+      .eq('id', v.existing_patient_id)
+      .maybeSingle();
+    if (exErr || !existing) {
+      return NextResponse.json({ error: 'existing_patient_not_found' }, { status: 404 });
+    }
+    patientId = existing.id as string;
+  } else {
+    const { data: patient, error: patErr } = await supabase
+      .from('patients')
+      .insert({
+        full_name: v.full_name,
+        dob: v.dob ?? null,
+        gender: v.gender ?? null,
+        country: v.country ?? null,
+        allergies: v.allergies ?? [],
+        created_by: session.user_id,
+      })
+      .select('id')
+      .single();
+    if (patErr || !patient) {
+      return NextResponse.json(
+        { error: 'patient_insert_failed', detail: patErr?.message },
+        { status: 400 },
+      );
+    }
+    patientId = patient.id;
 
-  const familyCode = generateAccessCode();
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + FAMILY_TTL_DAYS);
-  const { error: codeErr } = await supabase.from('family_access_codes').insert({
-    code: familyCode,
-    patient_id: patient.id,
-    granted_by_doctor_id: session.user_id,
-    allowed_sections: [
-      'care_rounds',
-      'emergency_info',
-      'medications',
-      'doctor_updates',
-    ],
-    expires_at: expiresAt.toISOString(),
-  });
-  if (codeErr) {
-    return NextResponse.json(
-      { error: 'code_insert_failed', detail: codeErr.message },
-      { status: 500 },
-    );
-  }
-
-  const { data: tokenRow, error: tokErr } = await supabase
-    .rpc('generate_wristband_token')
-    .single();
-  if (tokErr || typeof tokenRow !== 'string') {
-    return NextResponse.json(
-      { error: 'token_gen_failed', detail: tokErr?.message },
-      { status: 500 },
-    );
-  }
-  const wristbandToken = tokenRow;
-  const { error: insTokErr } = await supabase
-    .from('patient_wristband_tokens')
-    .insert({
-      patient_id: patient.id,
-      token: wristbandToken,
-      issued_by: session.user_id,
+    familyCode = generateAccessCode();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + FAMILY_TTL_DAYS);
+    const { error: codeErr } = await supabase.from('family_access_codes').insert({
+      code: familyCode,
+      patient_id: patientId,
+      granted_by_doctor_id: session.user_id,
+      allowed_sections: [
+        'care_rounds',
+        'emergency_info',
+        'medications',
+        'doctor_updates',
+      ],
+      expires_at: expiresAt.toISOString(),
     });
-  if (insTokErr) {
-    return NextResponse.json(
-      { error: 'token_insert_failed', detail: insTokErr.message },
-      { status: 500 },
-    );
+    if (codeErr) {
+      return NextResponse.json(
+        { error: 'code_insert_failed', detail: codeErr.message },
+        { status: 500 },
+      );
+    }
+
+    const { data: tokenRow, error: tokErr } = await supabase
+      .rpc('generate_wristband_token')
+      .single();
+    if (tokErr || typeof tokenRow !== 'string') {
+      return NextResponse.json(
+        { error: 'token_gen_failed', detail: tokErr?.message },
+        { status: 500 },
+      );
+    }
+    wristbandToken = tokenRow;
+    const { error: insTokErr } = await supabase
+      .from('patient_wristband_tokens')
+      .insert({
+        patient_id: patientId,
+        token: wristbandToken,
+        issued_by: session.user_id,
+      });
+    if (insTokErr) {
+      return NextResponse.json(
+        { error: 'token_insert_failed', detail: insTokErr.message },
+        { status: 500 },
+      );
+    }
   }
 
   const { data: intake, error: intakeErr } = await supabase
     .from('er_intake_reports')
     .insert({
-      patient_id: patient.id,
+      patient_id: patientId,
       er_staff_user_id: session.user_id,
       entry_at: v.entry_at ?? new Date().toISOString(),
       arrival_reason: v.arrival_reason,
@@ -147,9 +173,10 @@ export async function POST(req: Request) {
 
   return NextResponse.json({
     ok: true,
-    patient_id: patient.id,
+    patient_id: patientId,
+    intake_id: intake?.id,
     family_code: familyCode,
     wristband_token: wristbandToken,
-    intake_id: intake?.id,
+    is_returning: !!v.existing_patient_id,
   });
 }
