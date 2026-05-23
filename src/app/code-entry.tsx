@@ -4,7 +4,29 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-export function CodeEntry() {
+interface Labels {
+  placeholder: string;
+  submit: string;
+  submitting: string;
+  errorInvalid: string;
+  errorExpired: string;
+  errorRevoked: string;
+  errorOther: string;
+  errorNetwork: string;
+}
+
+const DEFAULT_LABELS: Labels = {
+  placeholder: 'Enter your code',
+  submit: 'Sign in',
+  submitting: 'Signing in…',
+  errorInvalid: 'Code not found. Check and try again.',
+  errorExpired: 'This code has expired.',
+  errorRevoked: 'This code has been revoked.',
+  errorOther: 'Sign-in failed.',
+  errorNetwork: 'Network error. Try again.',
+};
+
+export function CodeEntry({ labels = DEFAULT_LABELS }: { labels?: Labels }) {
   const router = useRouter();
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -24,18 +46,18 @@ export function CodeEntry() {
       if (!res.ok) {
         setError(
           j.error === 'invalid_code'
-            ? 'Code not found. Check and try again.'
+            ? labels.errorInvalid
             : j.error === 'expired'
-              ? 'This code has expired.'
+              ? labels.errorExpired
               : j.error === 'revoked'
-                ? 'This code has been revoked.'
-                : 'Sign-in failed.',
+                ? labels.errorRevoked
+                : labels.errorOther,
         );
         return;
       }
       router.push(j.redirect ?? '/');
     } catch {
-      setError('Network error. Try again.');
+      setError(labels.errorNetwork);
     } finally {
       setBusy(false);
     }
@@ -47,7 +69,7 @@ export function CodeEntry() {
         <Input
           value={code}
           onChange={(e) => setCode(e.target.value)}
-          placeholder="Enter your code"
+          placeholder={labels.placeholder}
           autoCapitalize="characters"
           autoComplete="off"
           spellCheck={false}
@@ -55,7 +77,7 @@ export function CodeEntry() {
           required
         />
         <Button type="submit" size="xl" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? labels.submitting : labels.submit}
         </Button>
       </div>
       {error && <p className="mt-2 text-sm text-red-300">{error}</p>}
